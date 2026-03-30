@@ -1,5 +1,7 @@
 # Facebook Lead Enricher
 
+![screenshot](screenshot.png)
+
 Enrich a CSV of business leads with Facebook page data (emails, Instagram, follower counts, ad status) using DuckDuckGo search and Apify.
 
 ## How it works
