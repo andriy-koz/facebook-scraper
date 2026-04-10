@@ -146,7 +146,12 @@ trap 'rm -f "$STATUS_FILE"' EXIT INT TERM
     printf 'total:     %d\n' "$total"
     printf 'resuming:  %d\n' "$done"
     printf 'remaining: %d\n' "$remaining"
-    printf 'proxy:     %s\n' "${PROXY_URL:+set}${PROXY_URL:-unset}"
+    if [ -n "$PROXY_URL" ]; then
+        masked=$(printf '%s' "$PROXY_URL" | sed -E 's#://[^@]*@#://***:***@#')
+        printf 'proxy:     %s\n' "$masked"
+    else
+        printf 'proxy:     unset\n'
+    fi
     printf 'apify:     set\n'
     printf 'python:    %s\n\n' "$PY"
 } >> "$LOG_FILE"
