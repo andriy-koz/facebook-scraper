@@ -113,8 +113,7 @@ def ddg_search(query, proxy=None, debug=False, retries=10, business=None):
         try:
             resp = requests.get(url, headers=headers, proxies=proxies, timeout=30)
         except requests.RequestException as exc:
-            if debug:
-                print(f"[ddg] attempt {attempt + 1} error: {exc}", file=sys.stderr)
+            print(f"[ddg] attempt {attempt + 1} error: {exc}", file=sys.stderr)
             continue
 
         if debug:
