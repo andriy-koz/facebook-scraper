@@ -42,8 +42,8 @@ for s in csv2jsonl.py ddg_search.py fb_scrape.py progress.py jsonl2csv.py _log.p
 done
 
 # --- Verify Python deps --------------------------------------------------
-if ! "$PY" -c 'import requests, lxml, rich' 2>/dev/null; then
-    die "missing Python deps — install with: $PY -m pip install requests lxml rich"
+if ! "$PY" -c 'import requests, lxml, lxml.cssselect, rich' 2>/dev/null; then
+    die "missing Python deps — install with: $PY -m pip install requests lxml cssselect rich"
 fi
 
 # --- Verify env vars -----------------------------------------------------
