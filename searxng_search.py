@@ -1,0 +1,214 @@
+"""
+SearXNG search — finds Facebook pages for businesses.
+Uses a self-hosted SearXNG instance with JSON API.
+Drop-in replacement for ddg_search.py.
+"""
+
+import json
+import logging
+import os
+import random
+import signal
+import sys
+import time
+
+import requests
+
+import _log
+
+log = logging.getLogger("searxng")
+
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "http://localhost:8888")
+
+if hasattr(signal, "SIGPIPE"):
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+_STATUS_MSGS = [
+    "Rolling through the web for {biz}...",
+    "Hunting down {biz}'s Facebook page...",
+    "Lighting up a search for {biz}...",
+    "Puffing through results for {biz}...",
+    "Blazing a trail to {biz}'s page...",
+]
+
+
+def _status(msg):
+    p = os.environ.get("STATUS_FILE")
+    if p:
+        try:
+            with open(p, "w") as f:
+                f.write(msg)
+        except OSError:
+            pass
+
+
+def searxng_search(query, retries=5, business=None):
+    """Search via SearXNG JSON API. Returns list of result dicts."""
+    url = f"{SEARXNG_URL.rstrip('/')}/search"
+    params = {"q": query, "format": "json"}
+    status_msg = random.choice(_STATUS_MSGS).format(biz=business) if business else None
+
+    log.debug("query: %s", query)
+
+    last_error = None
+    for attempt in range(1, retries + 1):
+        if status_msg:
+            _status(f"[SearXNG] {status_msg} [attempt {attempt}]")
+
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+        except requests.exceptions.ConnectionError as exc:
+            last_error = str(exc)
+            log.error("attempt %d: connection error — %s", attempt, exc)
+            time.sleep(2)
+            continue
+        except requests.exceptions.Timeout as exc:
+            last_error = str(exc)
+            log.error("attempt %d: timeout — %s", attempt, exc)
+            time.sleep(2)
+            continue
+        except requests.exceptions.RequestException as exc:
+            last_error = str(exc)
+            log.error("attempt %d: %s — %s", attempt, type(exc).__name__, exc)
+            time.sleep(2)
+            continue
+
+        log.debug("attempt %d: status %d", attempt, resp.status_code)
+
+        if resp.status_code == 429:
+            log.warning("attempt %d: rate-limited (429) — backing off 5s", attempt)
+            time.sleep(5)
+            continue
+
+        if resp.status_code != 200:
+            last_error = f"HTTP {resp.status_code}"
+            log.error("attempt %d: HTTP %d — %s", attempt, resp.status_code, resp.text[:200])
+            time.sleep(2)
+            continue
+
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            last_error = str(exc)
+            log.error("attempt %d: JSON decode error — %s", attempt, exc)
+            continue
+
+        results = []
+        for r in data.get("results", []):
+            results.append({
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "snippet": r.get("content", ""),
+            })
+
+        if results:
+            return results
+
+        log.debug("attempt %d: 0 results", attempt)
+        # no results — no point retrying the same query
+        break
+
+    log.error("search failed after %d attempts (last: %s) — query: %s",
+              retries, last_error, query)
+    return []
+
+
+def find_facebook_page(business, city, state):
+    """Search SearXNG for a business's Facebook page. Returns URL or None."""
+    query = f"{business} {city} {state} site:facebook.com"
+    results = searxng_search(query, business=business)
+
+    log.debug("%d results for %s", len(results), business)
+
+    for r in results:
+        url = r["url"]
+        if "facebook.com" in url and "/posts/" not in url and "/photos/" not in url:
+            log.debug("matched: %s", url)
+            return url
+
+    return None
+
+
+def _stdin_mode():
+    """Stream mode: JSONL in, enriched JSONL out."""
+    total = found = parse_errors = search_errors = missing = 0
+
+    for line_num, line in enumerate(sys.stdin, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            parse_errors += 1
+            log.error("line %d: JSON decode error — %s", line_num, exc)
+            continue
+
+        total += 1
+        business = (record.get("business") or "").strip()
+        city = (record.get("city") or "").strip()
+        state = (record.get("state") or "").strip()
+
+        if not business:
+            missing += 1
+            log.warning("line %d: missing 'business' field — passing through", line_num)
+            record["fb_url"] = None
+            print(json.dumps(record), flush=True)
+            continue
+
+        try:
+            fb_url = find_facebook_page(business, city, state)
+        except Exception:
+            search_errors += 1
+            log.exception("line %d: unexpected search failure for %s", line_num, business)
+            fb_url = None
+
+        record["fb_url"] = fb_url
+        if fb_url:
+            found += 1
+        print(json.dumps(record), flush=True)
+
+    log.info(
+        "done: %d processed, %d found, %d missing business, "
+        "%d parse errors, %d search errors",
+        total, found, missing, parse_errors, search_errors,
+    )
+
+
+def main():
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Find Facebook page via SearXNG")
+    ap.add_argument("business", nargs="?", help="Business name")
+    ap.add_argument("city", nargs="?", help="City")
+    ap.add_argument("state", nargs="?", help="State")
+    ap.add_argument("-d", "--debug", action="store_true")
+    ap.add_argument("--raw", action="store_true", help="Print all results as JSON")
+    args = ap.parse_args()
+
+    _log.setup("searxng", debug=args.debug)
+
+    log.info("SearXNG: %s", SEARXNG_URL)
+
+    # JSONL pipe mode
+    if not args.business:
+        _stdin_mode()
+        return
+
+    if args.raw:
+        query = f"{args.business} {args.city} {args.state} site:facebook.com"
+        results = searxng_search(query, business=args.business)
+        print(json.dumps(results, indent=2))
+        return
+
+    fb_url = find_facebook_page(args.business, args.city, args.state)
+    if fb_url:
+        print(fb_url)
+    else:
+        log.error("no Facebook page found for %s / %s / %s",
+                  args.business, args.city, args.state)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.csv
+*.jsonl
+*.log
+.env
+.git/
+screenshot.png

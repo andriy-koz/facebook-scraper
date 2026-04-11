@@ -33,11 +33,11 @@ if [ -x "$DIR/.venv/bin/python3" ]; then
 else
     PY=$(command -v python3 || true)
     [ -n "$PY" ] || die "python3 not found and no venv at $DIR/.venv"
-    warn "no venv at $DIR/.venv — falling back to system python3 ($PY)"
+    [ -f /.dockerenv ] || warn "no venv at $DIR/.venv — falling back to system python3 ($PY)"
 fi
 
 # --- Verify pipeline scripts --------------------------------------------
-for s in csv2jsonl.py ddg_search.py fb_scrape.py progress.py jsonl2csv.py _log.py; do
+for s in csv2jsonl.py searxng_search.py fb_scrape.py progress.py jsonl2csv.py _log.py; do
     [ -f "$DIR/$s" ] || die "missing pipeline file: $DIR/$s"
 done
 
@@ -48,9 +48,8 @@ fi
 
 # --- Verify env vars -----------------------------------------------------
 [ -n "$APIFY_TOKEN" ] || die "APIFY_TOKEN not set — add it to $DIR/.env"
-if [ -z "$PROXY_URL" ]; then
-    warn "PROXY_URL not set — DuckDuckGo will rate-limit direct requests"
-fi
+: "${SEARXNG_URL:=http://localhost:8888}"
+export SEARXNG_URL
 
 # --- --check mode: connectivity test ------------------------------------
 if [ "$1" = "--check" ]; then
@@ -58,13 +57,7 @@ if [ "$1" = "--check" ]; then
     info "python: $PY"
     info "deps:   ok"
     info "apify token: set (${#APIFY_TOKEN} chars)"
-    if [ -n "$PROXY_URL" ]; then
-        # Hide creds in echoed value
-        masked=$(printf '%s' "$PROXY_URL" | sed -E 's#://[^@]*@#://***:***@#')
-        info "proxy:  $masked"
-    else
-        info "proxy:  (not set)"
-    fi
+    info "searxng: $SEARXNG_URL"
 
     info ""
     info "--- testing Apify token (api.apify.com/v2/users/me) ---"
@@ -82,10 +75,24 @@ if [ "$1" = "--check" ]; then
     fi
 
     info ""
-    info "--- testing DuckDuckGo via proxy ---"
-    LOG_LEVEL=DEBUG "$PY" "$DIR/ddg_search.py" "Apple Inc" "Cupertino" "CA" \
+    info "--- testing SearXNG ($SEARXNG_URL) ---"
+    if command -v curl >/dev/null 2>&1; then
+        code=$(curl -s -o /dev/null -w '%{http_code}' \
+            "$SEARXNG_URL/search?q=test&format=json" || echo 000)
+        case "$code" in
+            200) info "  OK (200)" ;;
+            000) warn "  FAIL — could not reach $SEARXNG_URL" ;;
+            *)   warn "  FAIL (HTTP $code) — check SearXNG is running" ;;
+        esac
+    else
+        warn "  curl not installed — skipping HTTP check"
+    fi
+
+    info ""
+    info "--- testing search ---"
+    "$PY" "$DIR/searxng_search.py" "Apple Inc" "Cupertino" "CA" \
         >/dev/null 2>&1 && info "  OK (found Facebook page)" \
-        || warn "  FAIL — re-run with: LOG_LEVEL=DEBUG $PY ddg_search.py 'Apple Inc' Cupertino CA"
+        || warn "  FAIL — re-run with: LOG_LEVEL=DEBUG $PY searxng_search.py 'Apple Inc' Cupertino CA"
 
     info ""
     info "preflight done"
@@ -146,12 +153,7 @@ trap 'rm -f "$STATUS_FILE"' EXIT INT TERM
     printf 'total:     %d\n' "$total"
     printf 'resuming:  %d\n' "$done"
     printf 'remaining: %d\n' "$remaining"
-    if [ -n "$PROXY_URL" ]; then
-        masked=$(printf '%s' "$PROXY_URL" | sed -E 's#://[^@]*@#://***:***@#')
-        printf 'proxy:     %s\n' "$masked"
-    else
-        printf 'proxy:     unset\n'
-    fi
+    printf 'searxng:   %s\n' "$SEARXNG_URL"
     printf 'apify:     set\n'
     printf 'python:    %s\n\n' "$PY"
 } >> "$LOG_FILE"
@@ -166,7 +168,7 @@ if [ "$remaining" -gt 0 ]; then
     info "processing $remaining of $total leads..."
     if ! "$PY" "$DIR/csv2jsonl.py" < "$input" \
         | tail -n +$((done + 1)) \
-        | "$PY" "$DIR/ddg_search.py" \
+        | "$PY" "$DIR/searxng_search.py" \
         | "$PY" "$DIR/fb_scrape.py" \
         | "$PY" "$DIR/progress.py" --total "$total" --done "$done" \
         | tee -a "$checkpoint" > /dev/null
